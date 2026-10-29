@@ -24,6 +24,12 @@ pub enum GtkGestureClick {}
 pub enum GtkDrawingArea {}
 pub enum GtkCssProvider {}
 pub enum GtkPicture {}
+pub enum GtkListView {}
+pub enum GtkListItem {}
+pub enum GtkListItemFactory {}
+pub enum GtkNoSelection {}
+pub enum GtkStringList {}
+pub enum GListModel {}
 pub enum GdkPixbufLoader {}
 pub enum GdkPixbuf {}
 pub enum GdkPixbufAnimation {}
@@ -52,8 +58,27 @@ pub struct GTimeVal {
     pub tv_usec: c_long,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GdkRGBA {
+    pub red: f32,
+    pub green: f32,
+    pub blue: f32,
+    pub alpha: f32,
+}
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct GraphenePoint {
+    pub x: f32,
+    pub y: f32,
+}
+
 pub const GTK_ORIENTATION_HORIZONTAL: c_int = 0;
 pub const GTK_ORIENTATION_VERTICAL: c_int = 1;
+pub const GTK_PHASE_CAPTURE: c_int = 1;
+pub const GTK_ALIGN_START: c_int = 1;
+pub const PANGO_WRAP_WORD_CHAR: c_int = 2;
 pub const GTK_POLICY_AUTOMATIC: c_int = 1;
 pub const GTK_POLICY_NEVER: c_int = 2;
 pub const GTK_STYLE_PROVIDER_PRIORITY_APPLICATION: c_uint = 600;
@@ -150,7 +175,6 @@ unsafe extern "C" {
     pub fn gtk_widget_set_margin_top(widget: *mut GtkWidget, margin: c_int);
     pub fn gtk_widget_set_margin_bottom(widget: *mut GtkWidget, margin: c_int);
     pub fn gtk_widget_set_visible(widget: *mut GtkWidget, visible: gboolean);
-    pub fn gtk_widget_set_focusable(widget: *mut GtkWidget, focusable: gboolean);
     pub fn gtk_widget_get_first_child(widget: *mut GtkWidget) -> *mut GtkWidget;
     pub fn gtk_widget_get_parent(widget: *mut GtkWidget) -> *mut GtkWidget;
     pub fn gtk_widget_get_root(widget: *mut GtkWidget) -> *mut GtkRoot;
@@ -164,6 +188,7 @@ unsafe extern "C" {
     pub fn gtk_widget_set_tooltip_text(widget: *mut GtkWidget, text: *const c_char);
 
     pub fn gtk_event_controller_key_new() -> *mut GtkEventController;
+    pub fn gtk_event_controller_set_propagation_phase(controller: *mut GtkEventController, phase: c_int);
     pub fn gtk_gesture_click_new() -> *mut GtkGestureClick;
     pub fn gdk_display_get_default() -> *mut GdkDisplay;
     pub fn gdk_display_get_clipboard(display: *mut GdkDisplay) -> *mut GdkClipboard;
@@ -182,12 +207,12 @@ unsafe extern "C" {
     ) -> u64;
     pub fn g_object_unref(object: gpointer);
     pub fn g_object_ref(object: gpointer) -> gpointer;
+    pub fn g_object_ref_sink(object: gpointer) -> gpointer;
 }
 
 #[link(name = "glib-2.0")]
 unsafe extern "C" {
     pub fn g_timeout_add(interval: guint, function: unsafe extern "C" fn(gpointer) -> gboolean, data: gpointer) -> guint;
-    pub fn g_idle_add(function: unsafe extern "C" fn(gpointer) -> gboolean, data: gpointer) -> guint;
     pub fn g_main_loop_new(context: gpointer, is_running: gboolean) -> *mut GMainLoop;
     pub fn g_main_loop_run(loop_: *mut GMainLoop);
     pub fn g_main_loop_quit(loop_: *mut GMainLoop);
@@ -214,6 +239,39 @@ unsafe extern "C" {
     pub fn cairo_set_font_size(cr: *mut cairo_t, size: c_double);
     pub fn cairo_show_text(cr: *mut cairo_t, utf8: *const c_char);
     pub fn cairo_text_extents(cr: *mut cairo_t, utf8: *const c_char, extents: *mut CairoTextExtents);
+}
+
+#[link(name = "gtk-4")]
+unsafe extern "C" {
+    pub fn gtk_list_view_new(model: *mut GtkNoSelection, factory: *mut GtkListItemFactory) -> *mut GtkWidget;
+    pub fn gtk_list_view_set_model(list_view: *mut GtkListView, model: *mut GtkNoSelection);
+    pub fn gtk_signal_list_item_factory_new() -> *mut GtkListItemFactory;
+    pub fn gtk_no_selection_new(model: *mut GListModel) -> *mut GtkNoSelection;
+    pub fn gtk_string_list_new(strings: *const *const c_char) -> *mut GtkStringList;
+    pub fn gtk_list_item_set_child(item: *mut GtkListItem, child: *mut GtkWidget);
+    pub fn gtk_list_item_get_position(item: *mut GtkListItem) -> guint;
+    pub fn gtk_list_item_set_activatable(item: *mut GtkListItem, activatable: gboolean);
+    pub fn gtk_button_get_child(button: *mut GtkButton) -> *mut GtkWidget;
+    pub fn gtk_label_set_wrap_mode(label: *mut GtkLabel, mode: c_int);
+    pub fn gtk_widget_set_halign(widget: *mut GtkWidget, align: c_int);
+    pub fn gtk_list_item_set_selectable(item: *mut GtkListItem, selectable: gboolean);
+    pub fn gtk_widget_pick(widget: *mut GtkWidget, x: c_double, y: c_double, flags: c_int) -> *mut GtkWidget;
+    pub fn gtk_widget_measure(
+        widget: *mut GtkWidget,
+        orientation: c_int,
+        for_size: c_int,
+        minimum: *mut c_int,
+        natural: *mut c_int,
+        minimum_baseline: *mut c_int,
+        natural_baseline: *mut c_int,
+    );
+    pub fn gtk_widget_get_color(widget: *mut GtkWidget, color: *mut GdkRGBA);
+    pub fn gtk_widget_compute_point(
+        widget: *mut GtkWidget,
+        target: *mut GtkWidget,
+        point: *const GraphenePoint,
+        out_point: *mut GraphenePoint,
+    ) -> gboolean;
 }
 
 #[link(name = "gtk-4")]

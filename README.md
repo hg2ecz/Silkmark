@@ -199,7 +199,7 @@ Typical output:
 [cache:image] https://cdn.example.org/logo.jpg
 ```
 
-By default the browser selects GTK4 Adwaita when `GTK_THEME` is not already explicitly set. This avoids parser warnings caused by GTK3-only desktop themes. Use `--system-theme` to request the desktop-selected theme instead.
+The browser always uses the built-in GTK4 Adwaita theme (some desktop themes are GTK3-only and make GTK4 print parser warnings) and follows the desktop's light or dark preference. `Ctrl+Shift+D` toggles between light and dark and remembers the choice; `--theme light`, `--theme dark` and `--theme system` (or `--system-theme`) override both for one run.
 
 
 ## v0.13 sidebar

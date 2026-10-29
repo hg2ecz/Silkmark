@@ -65,6 +65,7 @@ pub struct Line {
 pub struct Document {
     pub lines: Vec<Line>,
     pub links: Vec<Link>,
+    pub index: BlockIndex,
 }
 
 fn plain_line(style: Style, markup: String) -> Line {
@@ -148,7 +149,8 @@ pub fn parse(src: &str) -> Document {
     let mut anchors = std::collections::HashMap::<String, usize>::new();
     let mut footnote_ref_counts = std::collections::HashMap::<String, usize>::new();
 
-    for (source_line_no, raw) in src.lines().enumerate() {
+    let source_lines: Vec<&str> = src.lines().collect();
+    for (source_line_no, raw) in source_lines.iter().copied().enumerate() {
         if footnote_source_lines.contains(&source_line_no) {
             continue;
         }
@@ -284,6 +286,7 @@ pub fn parse(src: &str) -> Document {
         if quote_depth == 0
             && leading_indent_columns(line) >= 4
             && !doc.lines.last().is_some_and(|prev| matches!(prev.style, Style::Text) && !prev.markup.is_empty())
+            && !continues_list(doc.lines.last(), content)
         {
             let text = strip_four_indent_columns(line);
             let markup = escape_markup(&text);
@@ -365,6 +368,13 @@ pub fn parse(src: &str) -> Document {
             None
         };
 
+        // CommonMark hard line break: an unescaped backslash at the end of a
+        // paragraph line, followed by another line of the same paragraph.
+        let backslash_break = matches!(style, Style::Text)
+            && ends_with_hard_break_backslash(body)
+            && source_lines.get(source_line_no + 1).is_some_and(|next| !next.trim().is_empty());
+        let body = if backslash_break { &body[..body.len() - 1] } else { body };
+
         let (mut markup, links) = match style {
             Style::TableRow => parse_table_markup(body, &references),
             Style::TableSep | Style::Rule | Style::Image | Style::Math | Style::Diagram | Style::Code => {
@@ -377,7 +387,7 @@ pub fn parse(src: &str) -> Document {
             markup.push_str(&percent_encode_fragment(id));
             markup.push_str("\">¶</a>");
         }
-        if matches!(style, Style::Text) && line.ends_with("  ") && !markup.is_empty() {
+        if (backslash_break || matches!(style, Style::Text) && line.ends_with("  ")) && !markup.is_empty() {
             markup.push('\n');
         }
         // Count only footnote references that the inline parser actually
@@ -543,6 +553,7 @@ pub fn parse(src: &str) -> Document {
             }
         }
     }
+    doc.index = BlockIndex::build(&doc.lines);
     doc
 }
 
@@ -565,6 +576,22 @@ fn coalesce_code_lines(lines: &mut Vec<Line>) {
         out.push(line);
     }
     *lines = out;
+}
+
+/// True when `s` ends with an odd number of backslashes, i.e. the last one is
+/// not itself escaped and therefore marks a hard line break.
+fn ends_with_hard_break_backslash(s: &str) -> bool {
+    (s.len() - s.trim_end_matches('\\').len()) % 2 == 1
+}
+
+/// A deeply indented list marker directly after a list item is a nested item,
+/// not an indented code block (`- a` / `  - b` / `    - c`).
+fn continues_list(prev: Option<&Line>, content: &str) -> bool {
+    prev.is_some_and(|p| matches!(p.style, Style::Bullet | Style::Ordered(_) | Style::Task(_)))
+        && (content.starts_with("- ")
+            || content.starts_with("* ")
+            || content.starts_with("+ ")
+            || parse_ordered_item(content).is_some())
 }
 
 fn leading_indent_columns(s: &str) -> usize {
@@ -890,7 +917,9 @@ fn parse_ordered_item(s: &str) -> Option<(u32, &str)> {
     Some((n, body))
 }
 
+mod blocks;
 mod inline;
+pub use blocks::{Block, BlockIndex, count_hits};
 use inline::{
     escape_attr, escape_markup, is_table_row, is_table_separator, parse_image_with_refs, parse_inline_ctx,
     parse_table_alignments, parse_table_cells, parse_table_markup,
@@ -957,6 +986,40 @@ pub fn percent_decode_fragment(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The URL as shown in the address bar: spaces and non-ASCII characters are decoded so
+/// `Patrick%20Olivelle%20%E2%80%94` reads as text. Every other escape stays encoded,
+/// because decoding `%2F` or `%3F` would change what the URL means.
+pub fn display_url(url: &str) -> String {
+    let bytes = url.as_bytes();
+    let mut out = String::with_capacity(url.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let mut run = Vec::new();
+        let mut j = i;
+        while j + 2 < bytes.len() && bytes[j] == b'%' {
+            match (hex(bytes[j + 1]), hex(bytes[j + 2])) {
+                (Some(a), Some(b)) if ((a << 4) | b) == 0x20 || ((a << 4) | b) >= 0x80 => {
+                    run.push((a << 4) | b);
+                    j += 3;
+                }
+                _ => break,
+            }
+        }
+        match std::str::from_utf8(&run) {
+            Ok(text) if j > i => {
+                out.push_str(text);
+                i = j;
+            }
+            _ => {
+                let ch = url[i..].chars().next().unwrap_or('%');
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
 }
 
 fn hex(b: u8) -> Option<u8> {

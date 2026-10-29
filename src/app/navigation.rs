@@ -20,6 +20,24 @@ impl App {
         self.active = idx;
         self.sync_active();
     }
+    pub(crate) unsafe fn scroll_document_pages(&mut self, pages: f64) {
+        self.scroll_document_by(|page_size| pages * page_size);
+    }
+    pub(crate) unsafe fn scroll_document_pixels(&mut self, pixels: f64) {
+        self.scroll_document_by(|_| pixels);
+    }
+    unsafe fn scroll_document_by(&mut self, delta: impl Fn(f64) -> f64) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let adj = gtk_scrolled_window_get_vadjustment(self.tabs[self.active].doc_scroll as *mut GtkScrolledWindow);
+        if adj.is_null() {
+            return;
+        }
+        let max = (gtk_adjustment_get_upper(adj) - gtk_adjustment_get_page_size(adj)).max(0.0);
+        let next = gtk_adjustment_get_value(adj) + delta(gtk_adjustment_get_page_size(adj));
+        gtk_adjustment_set_value(adj, next.clamp(0.0, max));
+    }
     pub(crate) unsafe fn scroll_document_edge(&mut self, bottom: bool) {
         if self.active >= self.tabs.len() {
             return;
@@ -110,9 +128,12 @@ impl App {
             return;
         }
         let q = CStr::from_ptr(p).to_string_lossy().into_owned();
-        self.tabs[self.active].search = q;
-        self.tabs[self.active].search_index = 0;
-        self.render_tab(self.active);
+        let tab = self.active;
+        self.tabs[tab].search = q;
+        self.tabs[tab].search_index = 0;
+        self.recompute_search(tab);
+        self.refresh_rows(tab);
+        self.scroll_to_target(tab);
         self.update_find_count();
     }
     pub(crate) unsafe fn find_step(&mut self, forward: bool) {
@@ -129,7 +150,9 @@ impl App {
         } else {
             self.tabs[self.active].search_index = (self.tabs[self.active].search_index + hits - 1) % hits;
         }
-        self.render_tab(self.active);
+        let tab = self.active;
+        self.refresh_rows(tab);
+        self.scroll_to_target(tab);
         self.update_find_count();
     }
     pub(crate) unsafe fn copy_text(&mut self, text: &str) {
@@ -268,7 +291,8 @@ impl App {
                 Some(id) => format!("Section #{id}"),
                 None => "Document top".into(),
             };
-            self.render_tab(tab);
+            self.scroll_to_target(tab);
+            self.update_tree_current(tab);
             if tab == self.active {
                 self.sync_active();
             }
@@ -284,14 +308,20 @@ impl App {
         self.tabs[tab].url = url.clone();
         self.tabs[tab].status = "Loading...".into();
         if tab == self.active {
-            set_entry(self.entry, &url);
+            set_entry(self.entry, &md::display_url(&url));
             self.refresh_status();
         }
         let (tx, rx) = mpsc::channel();
         let requested = url.clone();
         let fetch_url = md::document_url(&url);
         thread::spawn(move || {
-            let _ = tx.send(net::fetch(&fetch_url));
+            // Parsing is pure Rust, so it runs here and the UI thread only receives the finished model.
+            let result = net::fetch(&fetch_url).map(|(final_url, src)| {
+                let parse_started = Instant::now();
+                let doc = md::parse(&src);
+                Fetched { final_url, doc, source_bytes: src.len(), parse_elapsed: parse_started.elapsed() }
+            });
+            let _ = tx.send(result);
         });
         self.pending.push(Pending { tab, requested, rx });
     }

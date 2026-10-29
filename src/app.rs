@@ -6,9 +6,9 @@ use crate::net;
 use crate::session;
 use crate::{
     ICON_CLOSE, attach_zoom, c, connect, current_timeval, drop_bookmark_action_ctx, drop_bookmark_edit_ctx, drop_copy_code_ctx,
-    drop_link_ctx, drop_tab_close_ctx, drop_tree_toggle_ctx, focus_anchor_idle, icon_button, on_bookmark_action,
-    on_bookmark_manager_close, on_bookmark_rename, on_copy_code, on_inline_link, on_link_clicked, on_tab_close_clicked,
-    on_tree_toggle, set_entry, set_label, set_picture_bytes, set_scaled_pixbuf, short, strip_pango_markup,
+    drop_link_ctx, drop_tab_close_ctx, drop_tree_toggle_ctx, icon_button, on_bookmark_action, on_bookmark_manager_close,
+    on_bookmark_rename, on_copy_code, on_inline_link, on_link_clicked, on_tab_close_clicked, on_tree_toggle, set_entry,
+    set_label, set_picture_bytes, set_scaled_pixbuf, short, strip_pango_markup,
 };
 use std::collections::VecDeque;
 use std::ffi::{CStr, c_void};
@@ -29,10 +29,18 @@ pub(crate) struct CacheEntry {
     pub(crate) doc: Document,
 }
 
+/// A document fetched and parsed on a worker thread; only GTK work is left for the UI thread.
+pub(crate) struct Fetched {
+    pub(crate) final_url: String,
+    pub(crate) doc: Document,
+    pub(crate) source_bytes: usize,
+    pub(crate) parse_elapsed: std::time::Duration,
+}
+
 pub(crate) struct Pending {
     pub(crate) tab: usize,
     pub(crate) requested: String,
-    pub(crate) rx: Receiver<Result<(String, String), String>>,
+    pub(crate) rx: Receiver<Result<Fetched, String>>,
 }
 pub(crate) struct PendingImage {
     pub(crate) page: *mut GtkWidget,
@@ -71,13 +79,17 @@ pub(crate) struct Tab {
     pub(crate) page: *mut GtkWidget,
     pub(crate) tree_scroll: *mut GtkWidget,
     pub(crate) tree_box: *mut GtkWidget,
-    pub(crate) doc_box: *mut GtkWidget,
+    /// Contents buttons by heading anchor, valid until the sidebar is rebuilt.
+    pub(crate) tree_items: Vec<(String, *mut GtkWidget)>,
+    pub(crate) doc_view: *mut GtkWidget,
+    pub(crate) doc_ctx: *mut docview::DocViewCtx,
     pub(crate) doc_scroll: *mut GtkWidget,
     pub(crate) restore_scroll: Option<f64>,
     pub(crate) tab_label: *mut GtkWidget,
     pub(crate) search: String,
     pub(crate) search_index: usize,
     pub(crate) search_hits: usize,
+    pub(crate) search_spans: Vec<docview::HitSpan>,
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +136,9 @@ pub(crate) struct App {
     pub(crate) g_pending: bool,
     pub(crate) reader_zoom: i32,
     pub(crate) stats: bool,
+    /// Current appearance, and the user's explicit choice (None: following the desktop).
+    pub(crate) dark: bool,
+    pub(crate) dark_chosen: Option<bool>,
 }
 
 pub(crate) struct LinkCtx {
@@ -178,5 +193,6 @@ pub(crate) struct CopyCodeCtx {
 mod bookmarks_ui;
 mod cache;
 mod core;
+mod docview;
 mod navigation;
 mod render;

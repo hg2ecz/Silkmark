@@ -28,6 +28,7 @@ impl App {
         self.render_tab(tab);
         if tab == self.active {
             self.sync_active();
+            self.focus_document_if_idle(tab);
         }
         true
     }
@@ -104,11 +105,7 @@ impl App {
                         continue;
                     }
                     match result {
-                        Ok((final_url, src)) => {
-                            let parse_started = Instant::now();
-                            let source_bytes = src.len();
-                            let doc = md::parse(&src);
-                            let parse_elapsed = parse_started.elapsed();
+                        Ok(Fetched { final_url, doc, source_bytes, parse_elapsed }) => {
                             if self.stats {
                                 let heading_count = doc
                                     .lines
@@ -127,12 +124,7 @@ impl App {
                                 );
                             }
                             let final_with_fragment = md::with_fragment_from(&final_url, &p.requested);
-                            let title = md::document_url(&final_url)
-                                .rsplit('/')
-                                .next()
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or("index.md")
-                                .to_string();
+                            let title = document_title(&doc, &final_url);
                             self.tabs[p.tab].url = final_with_fragment;
                             self.tabs[p.tab].title = title.clone();
                             self.tabs[p.tab].doc = doc.clone();
@@ -141,6 +133,7 @@ impl App {
                             self.render_tab(p.tab);
                             if p.tab == self.active {
                                 self.sync_active();
+                                self.focus_document_if_idle(p.tab);
                             }
                         }
                         Err(e) => {
@@ -251,4 +244,18 @@ impl App {
             });
         }
     }
+}
+
+/// Tab title: the document's first heading, else its decoded file name.
+fn document_title(doc: &Document, url: &str) -> String {
+    let heading = doc
+        .lines
+        .iter()
+        .find(|l| matches!(l.style, Style::H1))
+        .map(|l| strip_pango_markup(&l.markup).replace('¶', "").trim().to_string())
+        .filter(|t| !t.is_empty());
+    heading.unwrap_or_else(|| {
+        let name = md::document_url(url).rsplit('/').next().map(md::percent_decode_fragment).unwrap_or_default();
+        if name.is_empty() { "index.md".to_string() } else { name }
+    })
 }

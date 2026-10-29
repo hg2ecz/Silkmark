@@ -13,6 +13,7 @@ mod mermaid;
 mod net;
 mod session;
 mod storage;
+mod theme;
 
 use ffi::*;
 use std::ffi::{CStr, CString, c_void};
@@ -154,21 +155,6 @@ unsafe extern "C" fn on_inline_link(_label: *mut GtkLabel, uri: *const i8, data:
     let target = CStr::from_ptr(uri).to_string_lossy().to_string();
     (*(data as *mut App)).open_link(target);
     1
-}
-unsafe extern "C" fn focus_anchor_idle(data: *mut c_void) -> gboolean {
-    if data.is_null() {
-        return 0;
-    }
-    let widget = data as *mut GtkWidget;
-    // A strong GObject reference keeps the widget alive, but it may have been
-    // detached by a newer render before this idle callback runs. GTK focus
-    // operations require a rooted widget, so never focus a stale subtree.
-    let root = gtk_widget_get_root(widget);
-    if !root.is_null() {
-        let _ = gtk_widget_grab_focus(widget);
-    }
-    g_object_unref(data);
-    0
 }
 unsafe extern "C" fn on_back(_b: *mut GtkButton, data: *mut c_void) {
     if data.is_null() {
@@ -341,7 +327,6 @@ unsafe extern "C" fn on_tick(data: *mut c_void) -> gboolean {
     }
     let app = &mut *(data as *mut App);
     app.poll();
-    app.apply_pending_scrolls();
     1
 }
 unsafe extern "C" fn on_find_changed(_w: *mut GtkWidget, data: *mut c_void) {
@@ -369,6 +354,10 @@ unsafe extern "C" fn on_find_close(_w: *mut GtkWidget, data: *mut c_void) {
     (&mut *(data as *mut App)).hide_find();
 }
 
+/// Space/Shift+Space scroll by this fraction of a page, j/k by this many pixels.
+const SCROLL_PAGE: f64 = 0.9;
+const SCROLL_LINE: f64 = 60.0;
+
 unsafe extern "C" fn on_key(
     _controller: *mut GtkEventControllerKey,
     keyval: u32,
@@ -383,6 +372,10 @@ unsafe extern "C" fn on_key(
     let ctrl = state & GDK_CONTROL_MASK != 0;
     let shift = state & GDK_SHIFT_MASK != 0;
     let alt = state & GDK_ALT_MASK != 0;
+    if ctrl && shift && (keyval == 0x0064 || keyval == 0x0044) {
+        app.toggle_dark();
+        return 1;
+    }
     if ctrl && shift && (keyval == 0x0074 || keyval == 0x0054) {
         app.reopen_closed_tab();
         return 1;
@@ -486,6 +479,27 @@ unsafe extern "C" fn on_key(
         app.g_pending = false;
         return 1;
     }
+    if !editing_text && !ctrl && !alt {
+        let handled = match keyval {
+            0x0020 => {
+                app.scroll_document_pages(if shift { -SCROLL_PAGE } else { SCROLL_PAGE });
+                true
+            }
+            0x006a => {
+                app.scroll_document_pixels(SCROLL_LINE);
+                true
+            }
+            0x006b => {
+                app.scroll_document_pixels(-SCROLL_LINE);
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            app.g_pending = false;
+            return 1;
+        }
+    }
     if !editing_text && !ctrl && !alt && keyval == 0x0047 {
         app.scroll_document_edge(true);
         app.g_pending = false;
@@ -512,13 +526,16 @@ const ICON_PLUS: usize = 5;
 const ICON_CLOSE: usize = 6;
 const ICON_BOOKMARK: usize = 7;
 
-unsafe extern "C" fn draw_icon(_area: *mut GtkDrawingArea, cr: *mut cairo_t, width: i32, height: i32, data: *mut c_void) {
+unsafe extern "C" fn draw_icon(area: *mut GtkDrawingArea, cr: *mut cairo_t, width: i32, height: i32, data: *mut c_void) {
     let kind = data as usize;
     let w = width as f64;
     let h = height as f64;
     let cx = w * 0.5;
     let cy = h * 0.5;
-    cairo_set_source_rgba(cr, 0.30, 0.32, 0.35, 1.0);
+    // Draw in the button's text color so the icons follow the light and dark appearance.
+    let mut color = GdkRGBA { red: 0.30, green: 0.32, blue: 0.35, alpha: 1.0 };
+    gtk_widget_get_color(area as *mut GtkWidget, &mut color);
+    cairo_set_source_rgba(cr, color.red as f64, color.green as f64, color.blue as f64, color.alpha as f64);
     cairo_set_line_width(cr, 1.8);
     match kind {
         ICON_BACK | ICON_FORWARD => {
@@ -595,7 +612,7 @@ unsafe fn install_embedded_css() {
         .tab-close { min-width: 22px; min-height: 22px; padding: 0; margin: 0; }
         .tab-title { margin: 0 2px; }
         .urlbar { border-radius: 8px; padding: 4px 8px; }
-        .document { font-family: Sans; font-size: 11pt; }
+        .document { font-family: Sans; font-size: 11pt; color: @theme_fg_color; }
         .md-text, .md-bullet, .md-task, .md-footnote { margin: 4px 0; }
         .md-quote { margin: 7px 0; }
         .md-math { margin: 8px 18px; padding: 8px 12px; font-family: serif; font-size: 15pt; }
@@ -614,6 +631,7 @@ unsafe fn install_embedded_css() {
         .md-table-cell { background: @theme_base_color; padding: 6px 9px; }
         .md-table-row { padding: 3px 7px; }
         .md-table-sep { min-height: 1px; opacity: 0.25; }
+        .document > row, .document > row:hover, .document > row:focus-within { padding: 0; min-height: 0; background: none; outline: none; }
         .md-rule { opacity: 0.25; margin: 14px 0; }
         .md-image-wrap { margin: 12px 0 18px 0; }
         .md-image-caption { opacity: 0.62; font-size: 9pt; }
@@ -622,8 +640,10 @@ unsafe fn install_embedded_css() {
         .tree-heading-button:hover { background: alpha(@theme_selected_bg_color, 0.10); }
         .tree-empty { opacity: 0.58; font-size: 9pt; margin: 0 8px 4px 8px; }
         .sidebar { background: alpha(@theme_fg_color, 0.035); }
-        .tree-link { padding: 5px 8px; border: none; box-shadow: none; background: transparent; }
+        .tree-link { padding: 4px 8px; border: none; box-shadow: none; background: transparent; }
         .tree-link:hover { background: alpha(@theme_selected_bg_color, 0.14); }
+        .tree-top { font-weight: 700; }
+        .tree-current { background: alpha(@theme_selected_bg_color, 0.22); }
         .searchbar { padding: 2px 8px; }
         .search-hit { background: alpha(#f6c344, 0.20); border-radius: 4px; }
         .search-current { background: alpha(#f6c344, 0.48); }
@@ -900,7 +920,7 @@ unsafe extern "C" fn on_image_zoom(_gesture: *mut GtkGestureClick, _n_press: i32
     gtk_window_present(window as *mut GtkWindow);
 }
 
-unsafe fn show_about_window(_parent: *mut GtkWidget) {
+pub(crate) unsafe fn show_about_window(_parent: *mut GtkWidget) {
     let window = gtk_window_new();
     gtk_window_set_title(window as *mut GtkWindow, c("About SilkMark").as_ptr());
     gtk_window_set_default_size(window as *mut GtkWindow, 520, 360);
@@ -946,6 +966,8 @@ unsafe fn show_about_window(_parent: *mut GtkWidget) {
     gtk_widget_set_tooltip_text(close, c("Close About window").as_ptr());
     gtk_box_append(root as *mut GtkBox, close);
     connect(close, "clicked", on_about_close as *const c_void, window as *mut c_void, None);
+    // The selectable license label would otherwise take the initial focus and show up selected.
+    gtk_window_set_focus(window as *mut GtkWindow, close);
 
     gtk_window_present(window as *mut GtkWindow);
 }
@@ -990,8 +1012,8 @@ usage: silkmark [options] [URL-or-file ...]",
 --offline                  do not use the network; network resources must be cached
 --clear-cache              remove the persistent SilkMark HTTP cache and exit
 --no-restore               do not restore the previous tabs/session on startup
---theme MODE              reader theme: light, dark or system (default: light)
---system-theme             compatibility alias for --theme system
+--theme MODE              appearance: light, dark or system (default: follow the desktop; Ctrl+Shift+D toggles and is remembered)
+--system-theme             alias for --theme system
 --max-document-mib N       maximum Markdown document size (default: 4 MiB)
 --max-image-mib N          maximum individual image size (default: 12 MiB)
 --max-redirects N          maximum HTTPS redirects (default: 8, maximum: 64)
@@ -1013,7 +1035,8 @@ Each URL or local Markdown path opens in its own tab. Relative links and images 
 
     let mut verbose = false;
     let mut stats = false;
-    let mut theme = String::from("light");
+    let mut theme = String::from("system");
+    let mut theme_given = false;
     let mut no_restore = false;
     let mut disk_cache = false;
     let mut offline = false;
@@ -1040,7 +1063,10 @@ Each URL or local Markdown path opens in its own tab. Relative links and images 
         match raw_args[i].as_str() {
             "-v" | "--verbose" => verbose = true,
             "--stats" => stats = true,
-            "--system-theme" => theme = String::from("system"),
+            "--system-theme" => {
+                theme = String::from("system");
+                theme_given = true;
+            }
             "--no-restore" => no_restore = true,
             "--disk-cache" => disk_cache = true,
             "--offline" => {
@@ -1059,7 +1085,10 @@ Each URL or local Markdown path opens in its own tab. Relative links and images 
                 i += 1;
                 let value = &raw_args[i];
                 match name.as_str() {
-                    "--theme" => theme = value.to_ascii_lowercase(),
+                    "--theme" => {
+                        theme = value.to_ascii_lowercase();
+                        theme_given = true;
+                    }
                     "--max-document-mib" => document_mib = parse_num(&name, value),
                     "--max-image-mib" => image_mib = parse_num(&name, value),
                     "--max-redirects" => max_redirects = parse_num(&name, value),
@@ -1112,29 +1141,22 @@ Each URL or local Markdown path opens in its own tab. Relative links and images 
     net::set_limits(document_mib, image_mib, max_redirects, connect_timeout, total_timeout);
     net::set_allowed_hosts(allow_hosts);
     let restore_state = if !no_restore && start_urls.is_empty() { session::load() } else { None };
-    match theme.as_str() {
-        "light" => {
-            if std::env::var_os("GTK_THEME").is_none() {
-                unsafe {
-                    std::env::set_var("GTK_THEME", "Adwaita");
-                }
-            }
-        }
-        "dark" => {
-            if std::env::var_os("GTK_THEME").is_none() {
-                unsafe {
-                    std::env::set_var("GTK_THEME", "Adwaita:dark");
-                }
-            }
-        }
-        "system" => {}
-        _ => {
-            eprintln!("--theme must be light, dark or system");
-            std::process::exit(2);
-        }
+    if !matches!(theme.as_str(), "light" | "dark" | "system") {
+        eprintln!("--theme must be light, dark or system");
+        std::process::exit(2);
     }
     unsafe {
         gtk_init();
+        // A flag wins, then the choice remembered by Ctrl+Shift+D, then the desktop's preference.
+        let saved_dark = session::load().and_then(|s| s.dark);
+        let remembered = if theme_given { None } else { saved_dark };
+        let dark = match (theme.as_str(), remembered) {
+            ("light", _) => false,
+            ("dark", _) => true,
+            (_, Some(dark)) => dark,
+            _ => theme::system_prefers_dark(),
+        };
+        theme::apply(dark);
         install_embedded_css();
         let main_loop = g_main_loop_new(ptr::null_mut(), 0);
         let window = gtk_window_new();
@@ -1201,10 +1223,14 @@ Each URL or local Markdown path opens in its own tab. Relative links and images 
         gtk_box_append(root as *mut GtkBox, status);
 
         let controller = gtk_event_controller_key_new();
+        // Capture phase: the document list view would otherwise consume Space and similar keys first.
+        gtk_event_controller_set_propagation_phase(controller, GTK_PHASE_CAPTURE);
         gtk_widget_add_controller(window, controller);
         let widgets = AppWidgets { window, notebook, entry, status, find_bar, find_entry, find_count };
         let app = Box::new(App::new(widgets, main_loop, verbose, stats));
         let app_ptr = Box::into_raw(app);
+        (*app_ptr).dark = dark;
+        (*app_ptr).dark_chosen = remembered;
         if let Some(state) = restore_state {
             (*app_ptr).sidebar_visible = state.sidebar_visible;
             (*app_ptr).tree_bookmarks_open = state.tree_bookmarks_open;
@@ -1216,7 +1242,7 @@ Each URL or local Markdown path opens in its own tab. Relative links and images 
                 for st in state.tabs {
                     (*app_ptr).add_tab();
                     let tab = (*app_ptr).active;
-                    (&mut (*app_ptr).tabs)[tab].restore_scroll = Some(st.scroll_y);
+                    (&mut (*app_ptr).tabs)[tab].restore_scroll = Some(st.position);
                     (*app_ptr).navigate(tab, st.url, false, true);
                 }
                 (*app_ptr).active = state.active.min((*app_ptr).tabs.len() - 1);

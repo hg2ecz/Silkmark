@@ -8,8 +8,10 @@
 - `src/app/navigation.rs` — history, URL navigation, search, completion and tab navigation.
 - `src/app/bookmarks_ui.rs` — bookmark UI operations.
 - `src/app/cache.rs` — document/image memory cache, async polling and image queue.
-- `src/app/render.rs` — Markdown document and sidebar rendering.
+- `src/app/render.rs` — tab render entry point and sidebar rendering.
+- `src/app/docview.rs` — virtualized document view: a `GtkListView` per tab with one row per `md::Block`, row widget builders, search highlighting and section/position jumps.
 - `src/md.rs` — block Markdown parser and public document model.
+- `src/md/blocks.rs` — display blocks, heading anchors and search text derived from a parsed document (built on the worker thread).
 - `src/md/inline.rs` — inline Markdown parsing, links, entities and table-cell inline markup.
 - `src/md/tests.rs` — Markdown regression tests, kept out of production parser code.
 - `src/net.rs` — URL normalization, local file access, libcurl HTTPS and disk cache.
@@ -17,6 +19,16 @@
 - `src/highlight.rs` — lightweight code syntax highlighting.
 - `src/ffi.rs` — raw GTK/GDK/Cairo/Glib FFI surface.
 - `STABILIZATION.md` — v0.40 release gate and v1.0 feature-freeze rules.
+
+## Threading and rendering
+
+- Fetching *and* parsing (`md::parse`, including the block index) run on a worker thread; the UI thread only receives the finished `Document`.
+- GTK widgets are created on the UI thread only, and only for the rows the list view asks for (`bind`). Opening a 1 MB document does not build thousands of widgets.
+- `GtkListView` unbinds and rebinds the same rows many times while scrolling (rows differ a lot in height, so its window of realized rows keeps shifting). Rebuilding a row each time made scrolling stutter, so `DocViewCtx` keeps built row widgets in an LRU cache (`ROW_CACHE`) and reuses them. The cache is dropped when the search highlight changes or a new document is shown.
+- Measure scrolling, not only opening: a smooth-scroll check is a loop that moves the vertical adjustment every 16 ms and records the frame clock deltas.
+- Search counts hits from the precomputed `BlockIndex::search_text`; it never rebuilds the document. Only the visible rows are rebuilt to move the highlight.
+- A reading position is stored as `block index + fraction of the block scrolled past`, because pixel offsets are only estimates in a virtualized list.
+- `gtk_list_view_scroll_to` needs GTK 4.12. It is looked up with `dlsym`; older GTK 4 falls back to an adjustment estimate that the row-alignment step corrects once the row exists.
 
 ## Clean-code rules
 

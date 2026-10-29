@@ -642,4 +642,71 @@ mod commonmark_v1_release_tests {
         let d = parse("    ```rust\n    let x = 1;\n    ```");
         assert!(d.lines.iter().all(|l| l.code.as_ref().is_none_or(|c| c.language.is_empty())));
     }
+
+    #[test]
+    fn backslash_hard_break_joins_lines_with_a_break() {
+        let d = parse("one\\\ntwo\\\nthree");
+        assert_eq!(d.lines.len(), 1);
+        assert_eq!(d.lines[0].markup, "one\ntwo\nthree");
+        // An escaped backslash is literal, and a trailing one ends the paragraph.
+        assert!(!parse("one\\\\\ntwo").lines[0].markup.contains('\n'));
+        assert_eq!(parse("end\\").lines[0].markup, "end\\");
+    }
+
+    #[test]
+    fn deeply_indented_list_items_stay_nested_lists() {
+        let d = parse("- a\n  - b\n    - c\n    - d\n  - e");
+        assert!(d.lines.iter().all(|l| matches!(l.style, Style::Bullet)));
+        assert_eq!(d.lines.iter().map(|l| l.indent).collect::<Vec<_>>(), [0, 1, 2, 2, 1]);
+        let ordered = parse("1. a\n   1. b\n      1. c");
+        assert!(ordered.lines.iter().all(|l| matches!(l.style, Style::Ordered(_))));
+        // A real indented code block after a blank line is still code.
+        assert!(parse("- a\n\n        code").lines.iter().any(|l| matches!(l.style, Style::Code)));
+    }
+
+    #[test]
+    fn blocks_group_tables_and_skip_unrenderable_lines() {
+        let d = parse("intro\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\noutro");
+        let kinds: Vec<_> = d.index.blocks.iter().map(|b| matches!(b, Block::Table { .. })).collect();
+        assert_eq!(kinds.iter().filter(|t| **t).count(), 1);
+        let Some(Block::Table { first, end }) = d.index.blocks.iter().copied().find(|b| matches!(b, Block::Table { .. })) else {
+            panic!("no table block");
+        };
+        assert_eq!(end - first, 4, "header, separator and two body rows");
+        assert_eq!(d.index.blocks.len(), d.index.search_text.len());
+    }
+
+    #[test]
+    fn block_anchors_point_at_the_block_holding_them() {
+        let d = parse("# Top\n\ntext\n\n## Second part\n\nmore");
+        let at = d.index.anchors["second_part"];
+        let Block::Line(i) = d.index.blocks[at] else { panic!("heading is a line block") };
+        assert!(matches!(d.lines[i].style, Style::H2));
+        assert_eq!(d.index.anchors["top"], 0);
+    }
+
+    #[test]
+    fn search_hits_count_table_cells_separately() {
+        let d = parse("Hello World\n\n| Hello | x |\n| --- | --- |\n| hello | Hello |");
+        let hits: Vec<usize> = d
+            .index
+            .blocks
+            .iter()
+            .zip(&d.index.search_text)
+            .map(|(b, t)| count_hits(t, "hello", matches!(b, Block::Table { .. })))
+            .collect();
+        // The blank line between the paragraph and the table is a block of its own.
+        assert_eq!(hits, [1, 0, 3]);
+        assert_eq!(count_hits("anything", "", false), 0);
+    }
+
+    #[test]
+    fn display_url_decodes_only_text_not_syntax() {
+        assert_eq!(display_url("file:///a/Olivelle%20%E2%80%94%20Early.md"), "file:///a/Olivelle — Early.md");
+        assert_eq!(display_url("https://x.org/a%2Fb%3Fc%23d"), "https://x.org/a%2Fb%3Fc%23d");
+        assert_eq!(display_url("https://x.org/p.md#els%C5%91_l%C3%A9p"), "https://x.org/p.md#első_lép");
+        // An invalid UTF-8 run is left alone, as is a truncated escape.
+        assert_eq!(display_url("a%E2%80b"), "a%E2%80b");
+        assert_eq!(display_url("100%"), "100%");
+    }
 }
